@@ -17,7 +17,7 @@ class SystemMonitor:
         self.root.title("Linux System Monitoring Tool (Real-Time)")
         self.root.geometry("800x600")
         
-        # Data queue for communication between server and GUI
+        # Data queue for communication between client and GUI
         self.data_queue = queue.Queue()
         
         # Styling
@@ -57,8 +57,11 @@ class SystemMonitor:
         # Data storage
         self.data = {}
         
+        # Create separate event loops for server and client
+        self.server_loop = asyncio.new_event_loop()
+        self.client_loop = asyncio.new_event_loop()
+        
         # Start WebSocket server and client in threads
-        self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.run_server, daemon=True).start()
         threading.Thread(target=self.run_client, daemon=True).start()
         self.root.after(100, self.check_queue)
@@ -106,21 +109,25 @@ class SystemMonitor:
             await asyncio.sleep(3600)  # Refresh every hour
 
     def run_server(self):
-        asyncio.set_event_loop(self.loop)
-        start_server = websockets.serve(self.server, "localhost", 8765)
-        self.loop.run_until_complete(start_server)
-        self.loop.run_forever()
+        asyncio.set_event_loop(self.server_loop)
+        self.server_loop.create_task(websockets.serve(self.server, "localhost", 8765))
+        self.server_loop.run_forever()
 
     async def client(self):
         uri = "ws://localhost:8765"
-        async with websockets.connect(uri) as websocket:
-            while True:
-                message = await websocket.recv()
-                self.data_queue.put(json.loads(message))
+        while True:
+            try:
+                async with websockets.connect(uri) as websocket:
+                    while True:
+                        message = await websocket.recv()
+                        self.data_queue.put(json.loads(message))
+            except (websockets.exceptions.ConnectionClosedError, ConnectionRefusedError):
+                await asyncio.sleep(1)  # Retry after a delay
 
     def run_client(self):
-        asyncio.set_event_loop(self.loop)
-        self.loop.run_until_complete(self.client())
+        asyncio.set_event_loop(self.client_loop)
+        self.client_loop.create_task(self.client())
+        self.client_loop.run_forever()
 
     def check_queue(self):
         try:
