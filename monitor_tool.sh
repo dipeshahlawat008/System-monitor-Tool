@@ -94,7 +94,7 @@ monitor_system() {
         check_temperature
         
         echo -e "\n${YELLOW}Press Ctrl+C to exit, or wait 5 seconds for refresh${NC}"
-        sleep 5
+        sleep 60
     done
 }
 
