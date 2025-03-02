@@ -1,110 +1,171 @@
-#!/bin/bash
+#!/usr/bin/env python3
 
-# System Monitoring Tool
-# Colors for better readability
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+import tkinter as tk
+from tkinter import ttk, scrolledtext
+import asyncio
+import websockets
+import json
+import subprocess
+import os
+import time
+import threading
+import queue
 
-# Function to display header
-print_header() {
-    clear
-    echo -e "${BLUE}=== Linux System Monitoring Tool ===${NC}"
-    echo -e "Date: $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "------------------------------------"
-}
-
-# Function to check CPU usage
-check_cpu() {
-    echo -e "\n${GREEN}CPU Usage:${NC}"
-    echo "----------------"
-    # Get CPU usage percentage
-    cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}')
-    echo "CPU Usage: ${cpu_usage}%"
-    
-    # Load averages
-    echo "Load Average: $(uptime | awk '{print $8,$9,$10}')"
-}
-
-# Function to check memory usage
-check_memory() {
-    echo -e "\n${GREEN}Memory Usage:${NC}"
-    echo "----------------"
-    free -h | grep -E "Mem:|Swap:" | awk '{print $1" Total: "$2" Used: "$3" Free: "$4}'
-}
-
-# Function to check disk usage
-check_disk() {
-    echo -e "\n${GREEN}Disk Usage:${NC}"
-    echo "----------------"
-    df -h | grep -E "^/dev/" | awk '{print $1" Mounted on "$6": "$5" used ("$4" free)"}'
-}
-
-# Function to check network status
-check_network() {
-    echo -e "\n${GREEN}Network Status:${NC}"
-    echo "----------------"
-    # Show network interfaces and their status
-    ip -br addr | awk '{print $1": "$3}'
-    # Show active connections
-    echo -e "\nActive Connections:"
-    netstat -tunap 2>/dev/null | grep ESTABLISHED | wc -l | xargs echo "Total established connections:"
-}
-
-# Function to check running processes
-check_processes() {
-    echo -e "\n${GREEN}Processes:${NC}"
-    echo "----------------"
-    echo "Total running processes: $(ps aux | wc -l)"
-    echo -e "\nTop 5 CPU-consuming processes:"
-    ps -eo pid,ppid,cmd,%cpu --sort=-%cpu | head -n 6
-}
-
-# Function to check system temperature (if sensors available)
-check_temperature() {
-    if command -v sensors &> /dev/null; then
-        echo -e "\n${GREEN}System Temperature:${NC}"
-        echo "----------------"
-        sensors | grep -E "Core|temp"
-    fi
-}
-
-# Function to check system info
-check_system() {
-    echo -e "\n${GREEN}System Info:${NC}"
-    echo "----------------"
-    echo "Hostname: $(hostname)"
-    echo "OS: $(cat /etc/os-release | grep PRETTY_NAME | cut -d'"' -f2)"
-    echo "Kernel: $(uname -r)"
-    echo "Uptime: $(uptime -p)"
-}
-
-# Main monitoring loop
-monitor_system() {
-    while true; do
-        print_header
-        check_system
-        check_cpu
-        check_memory
-        check_disk
-        check_network
-        check_processes
-        check_temperature
+class SystemMonitor:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Linux System Monitoring Tool (Real-Time)")
+        self.root.geometry("800x600")
         
-        echo -e "\n${YELLOW}Press Ctrl+C to exit, or wait 5 seconds for refresh${NC}"
-        sleep 2h
-    done
-}
+        # Data queue for communication between server and GUI
+        self.data_queue = queue.Queue()
+        
+        # Styling
+        self.style = ttk.Style()
+        self.style.configure("TButton", padding=5, font=("Helvetica", 10))
+        self.style.configure("Header.TLabel", font=("Helvetica", 14, "bold"))
+        
+        # Header
+        self.header = ttk.Label(root, text="Linux System Monitoring Tool", style="Header.TLabel")
+        self.header.pack(pady=10)
+        
+        # Date/Time Label
+        self.datetime_label = ttk.Label(root, text="")
+        self.datetime_label.pack()
+        
+        # Button Frame
+        self.button_frame = ttk.Frame(root)
+        self.button_frame.pack(pady=10)
+        
+        # Buttons
+        self.categories = ["System", "CPU", "Memory", "Disk", "Network", "Processes", "Temperature"]
+        for btn_text in self.categories:
+            ttk.Button(self.button_frame, text=btn_text, 
+                      command=lambda x=btn_text: self.display_info(x)).grid(
+                          row=0, column=self.categories.index(btn_text), 
+                          padx=5, pady=5)
+        
+        # Output Area
+        self.output = scrolledtext.ScrolledText(root, width=90, height=30, 
+                                              font=("Courier", 10))
+        self.output.pack(pady=10)
+        
+        # Status Label
+        self.status = ttk.Label(root, text="Starting server...")
+        self.status.pack()
+        
+        # Data storage
+        self.data = {}
+        
+        # Start WebSocket server and client in threads
+        self.loop = asyncio.new_event_loop()
+        threading.Thread(target=self.run_server, daemon=True).start()
+        threading.Thread(target=self.run_client, daemon=True).start()
+        self.root.after(100, self.check_queue)
 
-# Check if script is run with sudo privileges when needed
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${YELLOW}Note: Some features might require sudo privileges${NC}"
-fi
+    def run_command(self, command):
+        try:
+            result = subprocess.check_output(command, shell=True, text=True, stderr=subprocess.STDOUT)
+            return result.strip()
+        except subprocess.CalledProcessError as e:
+            return f"Error: {e.output}"
 
-# Trap Ctrl+C to exit gracefully
-trap 'echo -e "\n${RED}Exiting System Monitor...${NC}"; exit 0' INT
+    async def collect_data(self):
+        data = {
+            "datetime": time.strftime('%Y-%m-%d %H:%M:%S'),
+            "system": {
+                "hostname": self.run_command("hostname"),
+                "os": self.run_command("cat /etc/os-release | grep PRETTY_NAME | cut -d'\"' -f2"),
+                "kernel": self.run_command("uname -r"),
+                "uptime": self.run_command("uptime -p")
+            },
+            "cpu": {
+                "usage": self.run_command("top -bn1 | grep 'Cpu(s)' | awk '{print $2 + $4}'"),
+                "load_avg": self.run_command("uptime | awk '{print $8,$9,$10}'")
+            },
+            "memory": self.run_command("free -h | grep -E 'Mem:|Swap:'"),
+            "disk": self.run_command("df -h | grep -E '^/dev/'"),
+            "network": {
+                "interfaces": self.run_command("ip -br addr"),
+                "connections": self.run_command("netstat -tunap 2>/dev/null | grep ESTABLISHED | wc -l")
+            },
+            "processes": {
+                "total": self.run_command("ps aux | wc -l"),
+                "top5": self.run_command("ps -eo pid,ppid,cmd,%cpu --sort=-%cpu | head -n 6")
+            },
+            "temperature": self.run_command("sensors | grep -E 'Core|temp'") if self.run_command("command -v sensors") else "N/A"
+        }
+        return json.dumps(data)
 
-# Start monitoring
-monitor_system
+    async def server(self, websocket, path):
+        self.status.config(text="Server running, client connected")
+        while True:
+            data = await self.collect_data()
+            await websocket.send(data)
+            self.data_queue.put(json.loads(data))  # Update GUI via queue
+            await asyncio.sleep(3600)  # Refresh every hour
+
+    def run_server(self):
+        asyncio.set_event_loop(self.loop)
+        start_server = websockets.serve(self.server, "localhost", 8765)
+        self.loop.run_until_complete(start_server)
+        self.loop.run_forever()
+
+    async def client(self):
+        uri = "ws://localhost:8765"
+        async with websockets.connect(uri) as websocket:
+            while True:
+                message = await websocket.recv()
+                self.data_queue.put(json.loads(message))
+
+    def run_client(self):
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_until_complete(self.client())
+
+    def check_queue(self):
+        try:
+            while not self.data_queue.empty():
+                self.data = self.data_queue.get()
+                self.datetime_label.config(text=f"Date: {self.data['datetime']}")
+        except queue.Empty:
+            pass
+        self.root.after(100, self.check_queue)
+
+    def display_info(self, category):
+        self.output.delete(1.0, tk.END)
+        self.status.config(text=f"Displaying {category} information")
+        if not self.data:
+            self.output.insert(tk.END, "Waiting for initial data...\n")
+            return
+        
+        output = f"{category} Info\n" + "-"*20 + "\n"
+        if category == "System":
+            output += f"Hostname: {self.data['system']['hostname']}\n"
+            output += f"OS: {self.data['system']['os']}\n"
+            output += f"Kernel: {self.data['system']['kernel']}\n"
+            output += f"Uptime: {self.data['system']['uptime']}\n"
+        elif category == "CPU":
+            output += f"Usage: {self.data['cpu']['usage']}%\n"
+            output += f"Load Average: {self.data['cpu']['load_avg']}\n"
+        elif category == "Memory":
+            output += self.data['memory']
+        elif category == "Disk":
+            output += self.data['disk']
+        elif category == "Network":
+            output += self.data['network']['interfaces'] + "\n"
+            output += f"Total established connections: {self.data['network']['connections']}\n"
+        elif category == "Processes":
+            output += f"Total running processes: {self.data['processes']['total']}\n\n"
+            output += "Top 5 CPU-consuming processes:\n" + self.data['processes']['top5']
+        elif category == "Temperature":
+            output += self.data['temperature'] if self.data['temperature'] != "N/A" else "Temperature sensors not available\n"
+        
+        self.output.insert(tk.END, output)
+
+def main():
+    root = tk.Tk()
+    app = SystemMonitor(root)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
